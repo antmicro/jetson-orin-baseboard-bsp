@@ -1,0 +1,82 @@
+image: debian:bullseye
+
+build:
+  tags:
+    # Run this using Scalerunner
+    - ace-x86_64
+  variables:
+    # Special runner configuration vars
+    # see https://docs.gitlab.com/ee/ci/runners/configure_runners.html#configure-runner-behavior-with-variables
+    GIT_SUBMODULE_STRATEGY: recursive
+    GIT_DEPTH: 1
+    SCALENODE_CPU: 8
+    SCALENODE_RAM: 4096
+    # Place working directory under clone root, since clone root on Scalerunner is not on overlay fs, while everything else is,
+    # and we have problems with `tar -x` there (random cryptic "Directory renamed before its status could be extracted" errors)
+    WORK: $CI_PROJECT_DIR/_work
+  script:
+    # Introspect our environment a bit
+    - echo '-- ENV VARS --'
+    - export
+    - echo '-- MOUNTS --'
+    - mount -v
+    - echo '-- CI_PROJECT_DIR FILES --'
+    - cd $CI_PROJECT_DIR
+    - ls -la
+
+    # Make sure binfmt_misc support is there, NVidia scripts need it
+    - echo '-- Enable binfmt_misc --'
+    - grep binfmt_misc /proc/mounts || mount binfmt_misc -t binfmt_misc /proc/sys/fs/binfmt_misc
+    - echo 1 > /proc/sys/fs/binfmt_misc/status
+    - cat /proc/sys/fs/binfmt_misc/status
+
+    - echo '-- Installing necessary packages --'
+    - apt-get update && apt-get -y install build-essential git git-lfs wget sudo flex bison libssl-dev bc lbzip2 pigz xz-utils
+
+    - echo '-- Check git repo status --'
+    - cd $CI_PROJECT_DIR
+    - git status
+
+    - echo '-- Create out-of-tree working directory and download tools --'
+    - mkdir -p $WORK
+    - mkdir $WORK/download
+    - cd $WORK/download
+    - wget --content-disposition --progress=dot:giga 'https://developer.nvidia.com/downloads/jetson-linux-r3521-aarch64tbz2'
+    - wget --content-disposition --progress=dot:giga 'https://developer.nvidia.com/downloads/linux-sample-root-filesystem-r3521aarch64tbz2'
+    - wget --content-disposition --progress=dot:giga 'https://developer.nvidia.com/embedded/jetson-linux/bootlin-toolchain-gcc-93'
+    - echo '-- Downloaded files >> --'
+    - ls -l
+    
+    - echo '-- Unpack tools --'
+    - cd $WORK
+    - tar -I lbzip2 -xpf 'download/Jetson_Linux_R35.2.1_aarch64.tbz2'
+    - tar -I lbzip2 -xpf 'download/Tegra_Linux_Sample-Root-Filesystem_R35.2.1_aarch64.tbz2' -C ./Linux_for_Tegra/rootfs/
+    - mkdir toolchain
+    - tar -I pigz -xpf 'download/aarch64--glibc--stable-final.tar.gz' -C ./toolchain
+    
+    - echo '-- Install flash tool dependencies --'
+    - cd $WORK/Linux_for_Tegra
+    - ./tools/l4t_flash_prerequisites.sh
+
+    - echo '-- Install NV apps into rootfs --'
+    - cd $WORK/Linux_for_Tegra
+    - ./apply_binaries.sh
+
+    - echo '-- Build kernel --'
+    - export CROSS_COMPILE_AARCH64_PATH=$WORK/toolchain
+    - export CROSS_COMPILE_AARCH64=$CROSS_COMPILE_AARCH64_PATH/bin/aarch64-buildroot-linux-gnu-
+    - cd $CI_PROJECT_DIR
+    - ./build_kernel.sh
+
+    - echo '-- Patch L4T BSP --'
+    - cd $CI_PROJECT_DIR
+    - ./update_bsp.sh $WORK/Linux_for_Tegra
+
+    - echo '-- Package L4T BSP archive artifact --'
+    - cd $WORK
+    - XZ_OPT="-T0" tar -cJf $CI_PROJECT_DIR/L4T_JetsonOrinBaseboard.tar.xz ./Linux_for_Tegra
+
+  artifacts:
+    paths:
+      # Paths are relative to $CI_PROJECT_DIR
+      - ./L4T_JetsonOrinBaseboard.tar.xz

@@ -1,0 +1,4 @@
+
+[submodule "kernel"]
+	path = kernel
+	url = ../antmicro-jetson-orin-baseboard-kernel-5-10.git
